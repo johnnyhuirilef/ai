@@ -75,4 +75,26 @@ describe('durable agent run options', () => {
       expect(model.calls).toHaveLength(0);
     },
   );
+  describe.each(['maxTokens', 'maxCost'] as const)('budget.%s', (name) => {
+    it.each([-1, NaN, Infinity, -Infinity])('rejects invalid limit %s before workflow steps', async (value) => {
+      const { agents, model, ctx, step, executeChild } = await boot();
+      expect(() => agents.run(ctx, { prompt: 'Hello', budget: { [name]: value } })).toThrow(AiConfigurationError);
+      expect(step).not.toHaveBeenCalled();
+      expect(executeChild).not.toHaveBeenCalled();
+      expect(model.calls).toHaveLength(0);
+    });
+
+    it('rejects invalid module budget defaults', async () => {
+      const { agents, ctx, step } = await boot({ budget: { [name]: NaN } });
+      expect(() => agents.run(ctx, { prompt: 'Hello' })).toThrow(AiConfigurationError);
+      expect(step).not.toHaveBeenCalled();
+    });
+  });
+
+  it('rejects fractional token limits before workflow steps', async () => {
+    const { agents, ctx, step } = await boot();
+    expect(() => agents.run(ctx, { prompt: 'Hello', budget: { maxTokens: 1.5 } })).toThrow(AiConfigurationError);
+    expect(step).not.toHaveBeenCalled();
+  });
+
 });

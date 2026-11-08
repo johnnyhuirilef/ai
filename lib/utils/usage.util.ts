@@ -1,6 +1,7 @@
 import type { LanguageModelUsage } from 'ai';
-import type { AiModelPricing } from '../interfaces/ai-module-options.interface.js';
+import type { AiBudget, AiModelPricing } from '../interfaces/ai-module-options.interface.js';
 import type { AiUsage } from '../interfaces/ai-usage.interface.js';
+import { AiConfigurationError } from '../errors/ai.errors.js';
 
 export const ZERO_USAGE: AiUsage = Object.freeze({
   inputTokens: 0,
@@ -48,4 +49,21 @@ export function costOf(usage: AiUsage, pricing: AiModelPricing | undefined): num
 
 export function addCost(a: number | undefined, b: number | undefined): number | undefined {
   return a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
+}
+
+/** Validates the resolved budget before a model call or durable run starts. */
+export function validateBudget(budget?: AiBudget): void {
+  if (budget === undefined) {
+    return;
+  }
+  for (const name of ['maxTokens', 'maxCost'] as const) {
+    const value = budget?.[name];
+    if (value === undefined) {
+      continue;
+    }
+    if (!Number.isFinite(value) || value < 0 || (name === 'maxTokens' && !Number.isInteger(value))) {
+      const requirement = name === 'maxTokens' ? 'a finite whole number of at least 0' : 'a finite number of at least 0';
+      throw new AiConfigurationError(`\`budget.${name}\` must be ${requirement}. Got ${String(value)}.`);
+    }
+  }
 }

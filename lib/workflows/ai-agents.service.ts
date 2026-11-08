@@ -13,7 +13,7 @@ import type { StepOutcome } from '../runtime/steps.js';
 import { AiService } from '../services/ai.service.js';
 import { AiTools } from '../tools/ai-tools.service.js';
 import { INTERNAL_ERROR_MESSAGE } from '../utils/errors.util.js';
-import { addCost, addUsage, ZERO_USAGE } from '../utils/usage.util.js';
+import { addCost, addUsage, validateBudget, ZERO_USAGE } from '../utils/usage.util.js';
 import type {
   AiAgentRunOptions,
   AiAgentRunResult,
@@ -256,6 +256,7 @@ export class AiAgents {
       }
     }
     const budget = options.budget ?? defaults.budget;
+    validateBudget(budget);
     return {
       ...rest,
       tools: names,

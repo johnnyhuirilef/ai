@@ -8,6 +8,7 @@ import type { AiUsageEvent } from '../interfaces/ai-usage.interface.js';
 import type { AiModels, ResolvedModel } from '../models/ai-models.service.js';
 import type { AiToolProgress, AiTools } from '../tools/ai-tools.service.js';
 import { modelPolicy, type PolicyPlan, type StepAttempt } from './model-policy.js';
+import { validateBudget } from '../utils/usage.util.js';
 
 const DEFAULT_MAX_STEPS = 10;
 
@@ -91,6 +92,9 @@ export function createCallPlan(
     throw new AiConfigurationError(`\`maxSteps\` must be a whole number of at least 1. Got ${String(maxSteps)}.`);
   }
 
+  const budget = options.budget ?? defaults.budget;
+  validateBudget(budget);
+
   const policies = new Map<ResolvedModel, ResiliencePolicy | undefined>();
   const pick = <K extends keyof GenerationSettings>(model: ResolvedModel, key: K): GenerationSettings[K] =>
     (options as GenerationSettings)[key] ?? (model.settings as GenerationSettings)[key] ?? (defaults as GenerationSettings)[key];
@@ -100,7 +104,7 @@ export function createCallPlan(
     chain,
     signal,
     maxSteps,
-    ...((options.budget ?? defaults.budget) && { budget: options.budget ?? defaults.budget }),
+    ...(budget && { budget }),
     ...(options.instructions !== undefined && { instructions: options.instructions }),
     messages: messagesOf(options),
     ...(selected && { tools: selected }),

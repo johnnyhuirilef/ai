@@ -2,6 +2,7 @@
  * Model calls: options and their precedence, retries, fallback, timeouts, the caller's abort, usage events, cost
  * and budgets. Fake models only.
  */
+import * as z from 'zod';
 import { Logger } from '@nestjs/common';
 import type { TestingModule } from '@nestjs/testing';
 import {
@@ -328,6 +329,42 @@ describe('model calls', () => {
       const result = await ai.generateText({ prompt: 'Hi' });
       expect(result.cost).toBeUndefined();
       expect(result.steps[0]).not.toHaveProperty('cost');
+    });
+
+    describe.each(['maxTokens', 'maxCost'] as const)('budget.%s', (name) => {
+      it.each([-1, NaN, Infinity, -Infinity])('rejects invalid limit %s before calling the provider', async (value) => {
+        const model = new FakeModel(() => 'ok');
+        const { moduleRef: ref, ai } = await createAi({ models: { default: model } });
+        moduleRef = ref;
+        await expect(ai.generateText({ prompt: 'Hi', budget: { [name]: value } })).rejects.toBeInstanceOf(AiConfigurationError);
+        expect(() => ai.streamText({ prompt: 'Hi', budget: { [name]: value } })).toThrow(AiConfigurationError);
+        expect(model.calls).toHaveLength(0);
+      });
+
+      it('validates module defaults and allows a valid call override', async () => {
+        const model = new FakeModel(() => 'ok');
+        const { moduleRef: ref, ai } = await createAi({ models: { default: model }, defaults: { budget: { [name]: NaN } } });
+        moduleRef = ref;
+        await expect(ai.generateText({ prompt: 'Hi' })).rejects.toBeInstanceOf(AiConfigurationError);
+        expect(model.calls).toHaveLength(0);
+        await expect(ai.generateText({ prompt: 'Hi', budget: { maxTokens: 100, maxCost: 0.01 } })).resolves.toMatchObject({ text: 'ok' });
+      });
+
+      it('preserves zero as an exhausted budget', async () => {
+        const model = new FakeModel(() => 'ok');
+        const { moduleRef: ref, ai } = await createAi({ models: { default: model } });
+        moduleRef = ref;
+        await expect(ai.generateText({ prompt: 'Hi', budget: { [name]: 0 } })).rejects.toBeInstanceOf(AiBudgetExceededError);
+        expect(model.calls).toHaveLength(0);
+      });
+    });
+
+    it('rejects fractional token budgets for structured output before calling the provider', async () => {
+      const model = new FakeModel(() => 'ok');
+      const { moduleRef: ref, ai } = await createAi({ models: { default: model } });
+      moduleRef = ref;
+      await expect(ai.generateObject({ prompt: 'Hi', schema: z.object({ text: z.string() }), budget: { maxTokens: 1.5 } })).rejects.toBeInstanceOf(AiConfigurationError);
+      expect(model.calls).toHaveLength(0);
     });
 
     it('stops before a model call over the budget, with what was spent', async () => {

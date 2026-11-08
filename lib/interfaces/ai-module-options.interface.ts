@@ -17,9 +17,9 @@ export interface AiModelPricing {
 
 /** Limits on one call, over every step it makes. */
 export interface AiBudget {
-  /** Total tokens, input and output. */
+  /** Total tokens, input and output. A finite whole number of at least 0. */
   maxTokens?: number;
-  /** In the unit of the models' `pricing`. A model without pricing counts as free. */
+  /** In the unit of the models' `pricing`. A model without pricing counts as free. Must be finite and at least 0. */
   maxCost?: number;
 }
 
