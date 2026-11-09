@@ -56,28 +56,33 @@ export async function writeWebResponse(response: Response, res: ServerResponse):
     return;
   }
 
-  const headers: Record<string, string | string[]> = {};
-  response.headers.forEach((value, name) => {
-    if (name !== 'set-cookie') {
-      headers[name] = value;
+  try {
+    const headers: Record<string, string | string[]> = {};
+    response.headers.forEach((value, name) => {
+      if (name !== 'set-cookie') {
+        headers[name] = value;
+      }
+    });
+    const cookies = response.headers.getSetCookie();
+    if (cookies.length > 0) {
+      headers['set-cookie'] = cookies;
     }
-  });
-  const cookies = response.headers.getSetCookie();
-  if (cookies.length > 0) {
-    headers['set-cookie'] = cookies;
+    for (const [name, value] of Object.entries(headers)) {
+      res.setHeader(name, value);
+    }
+    res.writeHead(response.status);
+    if (!response.body) {
+      res.end();
+      return;
+    }
+    // The client should see the stream open now, not with its first event.
+    res.flushHeaders();
+  } catch (error) {
+    void response.body?.cancel().catch(() => {});
+    throw error;
   }
-  for (const [name, value] of Object.entries(headers)) {
-    res.setHeader(name, value);
-  }
-  res.writeHead(response.status);
-  if (!response.body) {
-    res.end();
-    return;
-  }
-  // The client should see the stream open now, not with its first event.
-  res.flushHeaders();
 
-  const reader = response.body.getReader();
+  const reader = response.body!.getReader();
   let gone = false;
   let release: (() => void) | undefined;
   const onClose = () => {
@@ -99,6 +104,7 @@ export async function writeWebResponse(response: Response, res: ServerResponse):
           release = resolve;
           res.once('drain', resolve);
         });
+        res.off('drain', release!);
         release = undefined;
       }
     }
@@ -109,9 +115,14 @@ export async function writeWebResponse(response: Response, res: ServerResponse):
       res.end();
     }
   } catch {
+    void reader.cancel().catch(() => {});
     // The body failed (a text stream whose call failed): the response ends early, as the client will see.
     res.destroy();
   } finally {
     res.off('close', onClose);
+    if (release) {
+      res.off('drain', release);
+    }
+    reader.releaseLock();
   }
 }

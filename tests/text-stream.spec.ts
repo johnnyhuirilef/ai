@@ -1,7 +1,10 @@
 /**
- * `streamText()` outside HTTP: the text and its promises, several readers, the UI message stream as a `Response`,
+ * `streamText()` and HTTP response cleanup: the text and its promises, several readers, the UI message stream as a `Response`,
  * timeouts that stop at the first chunk, fallback, usage events, aborts and failures nobody reads.
  */
+import { EventEmitter, once } from 'node:events';
+import { createServer, get, type ServerResponse } from 'node:http';
+import { writeWebResponse } from '../lib/http/node-response.util.js';
 import { Injectable } from '@nestjs/common';
 import type { TestingModule } from '@nestjs/testing';
 import * as z from 'zod';
@@ -32,6 +35,21 @@ async function collect(iterable: AsyncIterable<string>): Promise<string[]> {
     parts.push(part);
   }
   return parts;
+}
+
+
+function response() {
+  return Object.assign(new EventEmitter(), {
+    headersSent: false,
+    destroyed: false,
+    writableFinished: false,
+    setHeader: vi.fn(),
+    writeHead: vi.fn(),
+    flushHeaders: vi.fn(),
+    write: vi.fn(() => true),
+    end: vi.fn(),
+    destroy: vi.fn(),
+  });
 }
 
 describe('streamText()', () => {
@@ -190,5 +208,122 @@ describe('streamText()', () => {
     expect(() => ai.streamText({ prompt: 'Hi', tools: ['nope'] })).toThrow(AiConfigurationError);
     expect(() => ai.streamText({ model: 'nope', prompt: 'Hi' })).toThrow('There is no model named "nope"');
     expect(model.calls).toHaveLength(0);
+  });
+  it('cleans up when a real HTTP client disconnects during backpressure', async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) { controller.enqueue(new Uint8Array(1024 * 1024)); },
+      cancel,
+    });
+    let serverResponse: ServerResponse | undefined;
+    let sending: Promise<void> | undefined;
+    const server = createServer((_, res) => {
+      serverResponse = res;
+      sending = writeWebResponse(new Response(body), res);
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address() as { port: number };
+    const request = get(`http://127.0.0.1:${address.port}`, (incoming) => incoming.pause());
+    request.on('error', () => {});
+    try {
+      // A paused client eventually fills the socket buffers; no response methods are mocked.
+      await vi.waitFor(() => {
+        expect(serverResponse?.writableNeedDrain).toBe(true);
+        expect(serverResponse?.listenerCount('drain')).toBeGreaterThan(0);
+      });
+      request.destroy();
+      await sending;
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(serverResponse!.listenerCount('drain')).toBe(0);
+      expect(serverResponse!.listenerCount('close')).toBe(0);
+      expect(body.locked).toBe(false);
+    } finally {
+      request.destroy();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('does not wait for cancellation before destroying a failed response', async () => {
+    const cancel = vi.fn(() => new Promise<void>(() => {}));
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1])); },
+      cancel,
+    });
+    const res = response();
+    res.write.mockImplementation(() => { throw new Error('write failed'); });
+    await writeWebResponse(new Response(body), res as unknown as ServerResponse);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(res.destroy).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
+    expect(res.listenerCount('close')).toBe(0);
+  });
+
+  it('releases the reader and listeners after normal completion', async () => {
+    const body = new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+    const res = response();
+    await writeWebResponse(new Response(body), res as unknown as ServerResponse);
+    expect(body.locked).toBe(false);
+    expect(res.listenerCount('close')).toBe(0);
+    expect(res.end).toHaveBeenCalledOnce();
+  });
+
+  it('removes a pending drain listener and cancels the body on disconnect', async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([1])); },
+      cancel,
+    });
+    const res = response();
+    res.write.mockReturnValue(false);
+    const sending = writeWebResponse(new Response(body), res as unknown as ServerResponse);
+    await vi.waitFor(() => expect(res.listenerCount('drain')).toBe(1));
+    res.emit('close');
+    await sending;
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
+    expect(res.listenerCount('close')).toBe(0);
+    expect(res.listenerCount('drain')).toBe(0);
+    expect(res.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('releases the reader when the body fails', async () => {
+    const body = new ReadableStream<Uint8Array>({ start(controller) { controller.error(new Error('read failed')); } });
+    const res = response();
+    await writeWebResponse(new Response(body), res as unknown as ServerResponse);
+    expect(body.locked).toBe(false);
+    expect(res.listenerCount('close')).toBe(0);
+    expect(res.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('cancels the body when response headers cannot be written', async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({ cancel });
+    const res = response();
+    const error = new Error('headers failed');
+    res.writeHead.mockImplementation(() => { throw error; });
+    await expect(writeWebResponse(new Response(body), res as unknown as ServerResponse)).rejects.toBe(error);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
+  });
+
+  it.each(['open', 'create'] as const)('aborts production and removes the close listener when %s fails', async (stage) => {
+    const model = new FakeModel(() => ({ text: 'a long story told slowly', chunkDelay: 50 }));
+    const { moduleRef: ref, ai } = await createAi({ models: { default: model } });
+    moduleRef = ref;
+    const answer = ai.streamText({ prompt: 'Tell me a story' });
+    const res = response();
+    const error = new Error('setup failed');
+    const target = stage === 'open'
+      ? { raw: res, hijack() { throw error; }, getHeaders() { return {}; } }
+      : res;
+    if (stage === 'create') {
+      vi.spyOn(answer, 'toUIMessageStreamResponse').mockImplementation(() => { throw error; });
+    }
+    await expect(answer.pipeUIMessageStreamToResponse(target)).rejects.toBe(error);
+    expect(model.lastCall!.options.abortSignal?.aborted).toBe(true);
+    expect(res.listenerCount('close')).toBe(0);
+    await expect(answer.result).rejects.toBe(error);
   });
 });

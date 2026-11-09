@@ -214,12 +214,14 @@ export class AiTextStream {
     node.res.once('close', gone);
     try {
       await this.opened;
+      node.open();
+      await writeWebResponse(create(), node.res);
     } catch (error) {
-      node.res.off('close', gone);
+      this.abort(error);
       throw error;
+    } finally {
+      node.res.off('close', gone);
     }
-    node.open();
-    await writeWebResponse(create(), node.res);
   }
 
   /** Every entry from the first, then the new ones as they come, until the call ends. */
